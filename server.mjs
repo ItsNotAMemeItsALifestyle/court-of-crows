@@ -70,6 +70,7 @@ function publicState(room, token) {
     })),
     you: me?.id, hand: me?.hand || [], round: room.round, target: room.target,
     event: room.event, eventEffect: EVENTS.find((e) => e.name === room.event)?.effect || '',
+    chat: (room.chat || []).slice(-40),
     log: room.log.slice(-12), succession: room.succession, king: room.king, heir: room.heir,
     successionVote: room.successionVote ? {
       submitted: Object.keys(room.successionVote.votes).length,
@@ -405,14 +406,14 @@ const server = http.createServer(async (req, res) => {
       const room = {
         code: roomCode, phase: 'lobby', host: token,
         players: [{ id: randomUUID(), token, name: (data.name || 'Player').slice(0, 16), gold: 4, influence: 0, hand: [] }],
-        king: null, heir: null, target: 30, round: 0, event: null, log: ['Welcome to court. Invite 1–7 rivals with this room code.'],
+        king: null, heir: null, target: 30, round: 0, event: null, log: ['Welcome to court. Invite 1–7 rivals with this room code.'], chat: [],
         plays: {}, succession: 'Next in Line', deadline: null, assassination: null, successionVote: null,
         investments: [], pacts: [], pactOffers: [], pactIndex: 0, afterPacts: null, pendingAssassination: null,
       };
       draw(room.players[0], 5); rooms.set(roomCode, room);
       json(res, { token, state: publicState(room, token) }); return;
     }
-    const match = url.pathname.match(/^\/api\/(join|state|start|play|vote|succession|pact|leave)\/([A-Z0-9]+)$/);
+    const match = url.pathname.match(/^\/api\/(join|state|start|play|vote|succession|pact|leave|chat)\/([A-Z0-9]+)$/);
     if (match) {
       const [, action, roomCode] = match; const room = rooms.get(roomCode);
       if (!room) { json(res, { error: 'Room not found.' }, 404); return; }
@@ -427,6 +428,15 @@ const server = http.createServer(async (req, res) => {
       const token = data.token || url.searchParams.get('token'); const me = getPlayer(room, token);
       if (!me) { json(res, { error: 'You are not in this room.' }, 403); return; }
       if (action === 'leave') { leaveRoom(room, me); json(res, { ok: true }); return; }
+      if (action === 'chat') {
+        const message = String(data.message || '').trim();
+        if (!message) { json(res, { error: 'Write a message first.' }, 400); return; }
+        if (message.length > 240) { json(res, { error: 'Messages can be up to 240 characters.' }, 400); return; }
+        room.chat ||= [];
+        room.chat.push({ name: me.name, message, at: Date.now() });
+        if (room.chat.length > 100) room.chat.splice(0, room.chat.length - 100);
+        json(res, { state: publicState(room, token) }); return;
+      }
       if (action === 'state') { json(res, { state: publicState(room, token) }); return; }
       if (action === 'start') {
         if (token !== room.host) { json(res, { error: 'Only the host can begin the game.' }, 403); return; }
