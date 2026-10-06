@@ -7,6 +7,7 @@ import path from 'node:path';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4173);
 const rooms = new Map();
+const HAND_LIMIT = 12;
 
 const EVENTS = [
   { name: 'The Harvest Tax', effect: 'Every player collects 1 gold. Tax Dodge blocks your collection.' },
@@ -23,6 +24,7 @@ const CARDS = [
   'Patronage', 'Secret Pact', 'Royal Guard', 'Spy Network', 'Assassination Plot',
   'Counterplot', 'Tax Dodge', 'Gold Tribute', 'Blackmail', 'Mercenary Band',
   'Guild Investment', 'Court Censure',
+  'Hidden Blade', 'Pilgrim’s Alms', 'Royal Writ',
 ];
 const LAWS = ['Next in Line', 'Richest Vassal', 'Court Vote', 'Appointed Heir', 'Assassin Inherits'];
 const DECREES = ['Royal Prerogative', 'Favor the Heir', 'Favor a Vassal', 'Change Succession'];
@@ -39,11 +41,15 @@ const CARD_EFFECTS = {
   'Mercenary Band': 'Spend 1 gold to add 2 guards against an assassination. Combo: with Royal Guard, add 1 extra guard.',
   'Guild Investment': 'Spend 2 gold now; collect 4 gold at the start of next round.',
   'Court Censure': 'Choose a rival. They lose 1 influence and 1 gold, if they have any. Combo: when aimed at the same rival as Blackmail, they also lose 1 extra influence.',
+  'Hidden Blade': 'If you are a vassal, add 1 support to an assassination vote this round. If you are monarch, it instead adds 1 guard.',
+  'Pilgrim’s Alms': 'If you have 5 gold or less, gain 2 gold. Otherwise, gain 1 influence.',
+  'Royal Writ': 'Choose a rival and transfer 1 of their influence to yourself, if they have any.',
 };
 const CARD_COMBOS = [
   { name: 'Royal Treasury', cards: 'Patronage + Secret Pact', effect: 'If the pact is accepted, both players also gain 1 gold.' },
   { name: 'Coordinated Defense', cards: 'Royal Guard + Mercenary Band', effect: 'Add 1 extra guard against the assassination.' },
   { name: 'Coercive Audit', cards: 'Blackmail + Court Censure on the same rival', effect: 'That rival loses 1 extra influence.' },
+  { name: 'Veiled Conspiracy', cards: 'Assassination Plot + Hidden Blade', effect: 'The Hidden Blade adds 1 support to the plot.' },
 ];
 const code = () => {
   let value;
@@ -54,15 +60,16 @@ const getPlayer = (room, token) => room.players.find((p) => p.token === token);
 const getById = (room, id) => room.players.find((p) => p.id === id);
 const addLog = (room, message) => room.log.push(message);
 const randomCard = () => CARDS[Math.floor(Math.random() * CARDS.length)];
-function draw(player, count = 1) { for (let i = 0; i < count; i++) player.hand.push(randomCard()); }
+function draw(player, count = 1) { for (let i = 0; i < count && player.hand.length < HAND_LIMIT; i++) player.hand.push(randomCard()); }
 function publicState(room, token) {
   const me = getPlayer(room, token);
   const vote = room.assassination?.votes?.[me?.id];
   return {
-    code: room.code, phase: room.phase,
+    code: room.code, phase: room.phase, handLimit: HAND_LIMIT,
     host: room.players.find((p) => p.token === room.host)?.id,
     players: room.players.map((p) => ({
       id: p.id, name: p.name, gold: p.gold, influence: p.influence,
+      bot: Boolean(p.bot),
       king: p.id === room.king && room.phase !== 'succession_vote',
       deposed: room.phase === 'succession_vote' && p.id === room.deposedKing,
       heir: p.id === room.heir,
@@ -79,7 +86,7 @@ function publicState(room, token) {
     } : null,
     assassination: room.assassination ? {
       plotters: room.assassination.plotters,
-      yes: Object.values(room.assassination.votes).filter((v) => v.side === 'yes').reduce((n, v) => n + v.weight, 0),
+      yes: Object.values(room.assassination.votes).filter((v) => v.side === 'yes').reduce((n, v) => n + v.weight, 0) + (room.assassination.yesBonus || 0),
       no: Object.values(room.assassination.votes).filter((v) => v.side === 'no').reduce((n, v) => n + v.weight, 0) + room.assassination.autoNo,
       guard: room.assassination.guard,
       choice: vote?.side || null,
@@ -107,6 +114,82 @@ function start(room) {
   room.king = room.players[0].id; room.heir = room.players[1].id;
   room.deadline = Date.now() + 60000;
   addLog(room, `Round 1 begins: ${room.event}. ${room.players[0].name} wears the crown.`);
+  scheduleBot(room);
+}
+
+const BOT_NAMES = ['Mara Vane', 'Edric Vale', 'Ysabel Thorn', 'Oswin Reed', 'Nell Ashford', 'Hugh Bell', 'Alys Rook'];
+function botAction(room, bot) {
+  if (room.phase === 'play' && !room.plays[bot.id]) {
+    const hand = [...bot.hand];
+    const prefers = bot.id === room.king
+      ? ['Patronage','Guild Investment','Royal Guard','Tax Dodge','Counterplot','Blackmail','Court Censure','Assassination Plot','Secret Pact','Spy Network','Gold Tribute','Mercenary Band','Hidden Blade','Royal Writ','Pilgrim’s Alms']
+      : ['Patronage','Blackmail','Guild Investment','Tax Dodge','Assassination Plot','Secret Pact','Court Censure','Spy Network','Royal Guard','Counterplot','Mercenary Band','Gold Tribute','Hidden Blade','Royal Writ','Pilgrim’s Alms'];
+    const first = prefers.find((card) => hand.includes(card)) || hand[0];
+    const second = hand.find((card) => card !== first && (card === 'Patronage' || card === 'Royal Guard' || card === 'Tax Dodge' || card === 'Court Censure'));
+    const actions = [first, ...(second ? [second] : [])].map((card) => {
+      const rivals = room.players.filter((p) => p.id !== bot.id);
+      let target = rivals[0]?.id;
+      if (['Blackmail','Court Censure'].includes(card)) target = [...rivals].sort((a,b) => b.gold-a.gold)[0]?.id || target;
+      if (card === 'Secret Pact') target = [...rivals].sort((a,b) => (a.king ? 1 : 0)-(b.king ? 1 : 0) || a.influence-b.influence)[0]?.id || target;
+      return { card, target };
+    });
+    for (const {card} of actions) bot.hand.splice(bot.hand.indexOf(card),1);
+    draw(bot, actions.length);
+    let decree = null, favor = null;
+    if (bot.id === room.king) {
+      const heir = getById(room, room.heir);
+      if (heir && heir.gold < bot.gold + 4 && heir.gold < room.target - 2 && Math.random() < .24) { decree = 'Favor the Heir'; }
+      else if (room.players.some(p => p.id !== bot.id && p.gold > bot.gold + 3) && Math.random() < .16) {
+        decree = 'Favor a Vassal'; favor = [...room.players].filter(p => p.id !== bot.id).sort((a,b) => a.gold-b.gold)[0]?.id;
+      } else decree = 'Royal Prerogative';
+    }
+    room.plays[bot.id] = { actions, decree, favor, successionCost: 0 };
+    addLog(room, `${bot.name} commits their cards.`);
+    if (room.players.every((p) => room.plays[p.id])) resolveCards(room);
+    return;
+  }
+  if (room.phase === 'pact_response') {
+    const offer = room.pactOffers[room.pactIndex];
+    if (offer?.to === bot.id) { answerPact(room, bot, true); return; }
+  }
+  if (room.phase === 'assassination' && !room.assassination.votes[bot.id]) {
+    const king = getById(room, room.king);
+    const yes = bot.id !== room.king && (bot.id === room.heir || (king && king.gold >= bot.gold + 3) || room.assassination.plotters.length >= 2);
+    const spend = bot.influence > 0 && Math.random() < .25;
+    if (spend) bot.influence--;
+    room.assassination.votes[bot.id] = { side: yes ? 'yes' : 'no', weight: spend ? 2 : 1 };
+    addLog(room, `${bot.name} votes to ${yes ? 'support' : 'oppose'} the plot${spend ? ', spending influence' : ''}.`);
+    if (room.players.every((p) => room.assassination.votes[p.id])) resolveAssassination(room);
+    return;
+  }
+  if (room.phase === 'succession_vote' && !room.successionVote.votes[bot.id]) {
+    const candidates = room.players.filter(p => p.id !== room.deposedKing);
+    const candidate = [...candidates].sort((a,b) => { const rank = p => (p.id === bot.id ? 3 : 0) + (p.heir ? 2 : 0) + p.gold * .04; return rank(b) - rank(a); })[0] || bot;
+    const spend = bot.influence > 0 && Math.random() < .2;
+    if (spend) bot.influence--;
+    room.successionVote.votes[bot.id] = { candidate: candidate.id, weight: spend ? 2 : 1 };
+    addLog(room, `${bot.name} casts a succession vote${spend ? ' using influence' : ''}.`);
+    if (room.players.every((p) => room.successionVote.votes[p.id])) resolveCourtVote(room);
+  }
+}
+function scheduleBot(room) {
+  if (room.botScheduled || room.phase === 'lobby' || room.phase === 'ended') return;
+  const bot = room.players.find((p) => {
+    if (!p.bot) return false;
+    if (room.phase === 'play') return !room.plays[p.id];
+    if (room.phase === 'pact_response') return room.pactOffers[room.pactIndex]?.to === p.id;
+    if (room.phase === 'assassination') return !room.assassination.votes[p.id];
+    if (room.phase === 'succession_vote') return !room.successionVote.votes[p.id];
+    return false;
+  });
+  if (!bot) return;
+  room.botScheduled = true;
+  setTimeout(() => {
+    room.botScheduled = false;
+    if (!rooms.has(room.code)) return;
+    botAction(room, bot);
+    scheduleBot(room);
+  }, 650 + Math.floor(Math.random() * 650));
 }
 function nextInLine(room, excluded = room.king) {
   const start = room.players.findIndex((p) => p.id === excluded);
@@ -178,7 +261,7 @@ function answerPact(room, responder, accepted) {
 }
 function resolveAssassination(room) {
   const votes = Object.values(room.assassination.votes);
-  const yes = votes.filter((v) => v.side === 'yes').reduce((n, v) => n + v.weight, 0);
+  const yes = votes.filter((v) => v.side === 'yes').reduce((n, v) => n + v.weight, 0) + (room.assassination.yesBonus || 0);
   const no = votes.filter((v) => v.side === 'no').reduce((n, v) => n + v.weight, 0) + room.assassination.autoNo;
   const guard = room.assassination.guard;
   const plotter = room.assassination.plotters[0];
@@ -232,6 +315,7 @@ function applyEvent(room) {
 }
 function resolveCards(room) {
   const guard = { value: 0 };
+  const yesBonus = { value: 0 };
   const autoNo = { value: 0 };
   const plotters = [];
   const pactOffers = [];
@@ -269,6 +353,15 @@ function resolveCards(room) {
         const combo = play.actions.some((a) => a.card === 'Blackmail' && a.target === action.target);
         target.influence = Math.max(0, target.influence - (combo ? 2 : 1)); target.gold = Math.max(0, target.gold - 1);
         addLog(room, `${p.name} censures ${target.name}, costing them 1 influence and 1 gold${combo ? ' plus 1 extra influence through the Coercive Audit combo' : ''}.`);
+      } else if (action.card === 'Hidden Blade') {
+        if (p.id === room.king) { guard.value++; addLog(room, `${p.name} uses a Hidden Blade to add 1 guard.`); }
+        else { yesBonus.value++; addLog(room, `${p.name} readies a Hidden Blade (+1 support if a plot begins).`); }
+      } else if (action.card === 'Pilgrim’s Alms') {
+        if (p.gold <= 5) { p.gold += 2; addLog(room, `${p.name} receives 2 gold in Pilgrim’s Alms.`); }
+        else { p.influence++; addLog(room, `${p.name} turns Pilgrim’s Alms into 1 influence.`); }
+      } else if (action.card === 'Royal Writ' && target && target.id !== p.id) {
+        if (target.influence > 0) { target.influence--; p.influence++; addLog(room, `${p.name} uses a Royal Writ to claim 1 influence from ${target.name}.`); }
+        else addLog(room, `${p.name} finds no influence to claim with a Royal Writ.`);
       }
     }
     if (play.actions.some((a) => a.card === 'Royal Guard') && mercenaryUsed) {
@@ -286,7 +379,7 @@ function resolveCards(room) {
       royalPlay.successionCost = 0;
     }
     const votes = Object.fromEntries(plotters.map((id) => [id, { side: 'yes', weight: 1 }]));
-    room.pendingAssassination = { plotters, votes, guard: guard.value, autoNo: autoNo.value };
+    room.pendingAssassination = { plotters, votes, guard: guard.value, autoNo: autoNo.value, yesBonus: yesBonus.value };
     if (room.event === 'Night of Knives') addLog(room, 'Night of Knives: a surprise plot begins.');
     beginPactResponses(room, pactOffers, 'assassination');
     return;
@@ -413,11 +506,22 @@ const server = http.createServer(async (req, res) => {
       draw(room.players[0], 5); rooms.set(roomCode, room);
       json(res, { token, state: publicState(room, token) }); return;
     }
-    const match = url.pathname.match(/^\/api\/(join|state|start|play|vote|succession|pact|leave|chat)\/([A-Z0-9]+)$/);
+    const match = url.pathname.match(/^\/api\/(join|state|start|play|vote|succession|pact|leave|chat|bot)\/([A-Z0-9]+)$/);
     if (match) {
       const [, action, roomCode] = match; const room = rooms.get(roomCode);
       if (!room) { json(res, { error: 'Room not found.' }, 404); return; }
       const data = req.method === 'POST' ? await body(req) : {};
+      if (action === 'bot') {
+        if (data.token !== room.host) { json(res, { error: 'Only the host can add a courtier.' }, 403); return; }
+        if (room.phase !== 'lobby') { json(res, { error: 'Bots can only be added before the game begins.' }, 409); return; }
+        if (room.players.length >= 8) { json(res, { error: 'The court is full.' }, 409); return; }
+        const botNumber = room.players.filter(p => p.bot).length;
+        const name = BOT_NAMES[botNumber % BOT_NAMES.length];
+        const bot = { id: randomUUID(), token: null, bot: true, name, gold: 4, influence: 0, hand: [] };
+        draw(bot, 5); room.players.push(bot);
+        addLog(room, `${name}, a courtier controlled by the host, joins the court.`);
+        json(res, { state: publicState(room, data.token) }); return;
+      }
       if (action === 'join') {
         if (room.phase !== 'lobby') { json(res, { error: 'This court has already begun.' }, 409); return; }
         if (room.players.length >= 8) { json(res, { error: 'This court is full.' }, 409); return; }
@@ -442,6 +546,7 @@ const server = http.createServer(async (req, res) => {
         if (token !== room.host) { json(res, { error: 'Only the host can begin the game.' }, 403); return; }
         if (room.players.length < 2) { json(res, { error: 'Invite at least one more player before starting.' }, 400); return; }
         if (room.phase === 'lobby') start(room);
+        scheduleBot(room);
         json(res, { state: publicState(room, token) }); return;
       }
       if (action === 'play') {
@@ -471,6 +576,7 @@ const server = http.createServer(async (req, res) => {
         };
         addLog(room, `${me.name} commits their cards.`);
         if (room.players.every((p) => room.plays[p.id])) resolveCards(room);
+        scheduleBot(room);
         json(res, { state: publicState(room, token) }); return;
       }
       if (action === 'vote') {
@@ -481,12 +587,14 @@ const server = http.createServer(async (req, res) => {
           room.assassination.votes[me.id] = { side: data.vote === 'yes' ? 'yes' : 'no', weight: spend ? 2 : 1 };
         }
         if (room.players.every((p) => room.assassination.votes[p.id])) resolveAssassination(room);
+        scheduleBot(room);
         json(res, { state: publicState(room, token) }); return;
       }
       if (action === 'pact') {
         if (room.phase !== 'pact_response') { json(res, { error: 'There is no pact waiting for your answer.' }, 409); return; }
         try { answerPact(room, me, Boolean(data.accept)); }
         catch (error) { json(res, { error: error.message }, 403); return; }
+        scheduleBot(room);
         json(res, { state: publicState(room, token) }); return;
       }
       if (action === 'succession') {
@@ -500,6 +608,7 @@ const server = http.createServer(async (req, res) => {
           addLog(room, `${me.name} casts a succession vote${spend ? ' using influence' : ''}.`);
         }
         if (room.players.every((p) => room.successionVote.votes[p.id])) resolveCourtVote(room);
+        scheduleBot(room);
         json(res, { state: publicState(room, token) }); return;
       }
     }
