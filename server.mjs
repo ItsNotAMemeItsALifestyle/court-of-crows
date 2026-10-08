@@ -11,21 +11,22 @@ const HAND_LIMIT = 10;
 const INFLUENCE_LIMIT = 3;
 
 const EVENTS = [
-  { name: 'The Harvest Tax', effect: 'Every player collects 1 gold. Tax Dodge blocks your collection.' },
+  { name: 'The Harvest Tax', effect: 'Every player gains 1 gold. Tax Dodge earns its player 1 extra gold.' },
   { name: 'A Royal Wedding', effect: 'The monarch receives 2 gold from the wedding gifts.' },
   { name: 'Border Skirmish', effect: 'The richest vassal loses 2 gold to the war effort.' },
   { name: 'The King’s Feast', effect: 'The monarch pays 1 gold to each vassal who can be paid.' },
   { name: 'A Missing Heir', effect: 'Every player gains 1 influence as rival claims emerge.' },
   { name: 'The Plague Bell', effect: 'The poorest player gains 2 gold; everyone else loses 1 gold.' },
   { name: 'A Merchant’s Petition', effect: 'The player with the most influence gains 2 gold from the guild.' },
-  { name: 'The Winter Levy', effect: 'Each vassal pays 1 gold to the monarch. Tax Dodge blocks the payment.' },
+  { name: 'The Winter Levy', effect: 'Each vassal pays 1 gold to the monarch unless they play Tax Dodge.' },
   { name: 'Night of Knives', effect: 'A surprise threat begins an assassination vote, even without an Assassination Plot card.' },
 ];
 const CARDS = [
   'Patronage', 'Secret Pact', 'Royal Guard', 'Spy Network', 'Assassination Plot',
   'Counterplot', 'Tax Dodge', 'Gold Tribute', 'Blackmail', 'Mercenary Band',
   'Guild Investment', 'Court Censure',
-  'Hidden Blade', 'Pilgrim’s Alms', 'Royal Writ',
+  'Hidden Blade', 'Pilgrim’s Alms', 'Royal Writ', 'King’s Bounty',
+  'Letters of Protection', 'Petition for Redress', 'Poisoned Wine',
 ];
 const LAWS = ['Next in Line', 'Richest Vassal', 'Court Vote', 'Appointed Heir', 'Assassin Inherits'];
 const DECREES = ['Royal Prerogative', 'Favor the Heir', 'Favor a Vassal', 'Change Succession', 'Court Appointment'];
@@ -44,8 +45,8 @@ const CARD_EFFECTS = {
   'Spy Network': 'Choose a rival. Swap a random card in your hand with a random card in theirs.',
   'Assassination Plot': 'Starts a court vote to remove the monarch. The plotter automatically supports it.',
   Counterplot: 'Adds 1 automatic opposing vote against an assassination plot.',
-  'Tax Dodge': 'Avoids this round’s Harvest Tax or Winter Levy.',
-  'Gold Tribute': 'Give 1 gold to the monarch and gain 1 influence to spend on votes or succession.',
+  'Tax Dodge': 'During Harvest Tax, gain 2 gold instead of 1. During Winter Levy, keep the 1 gold you would have paid.',
+  'Gold Tribute': 'Vassal: pay 1 gold to the monarch and gain 1 influence. Monarch: choose a vassal to pay you 1 gold; gain 1 influence.',
   Blackmail: 'Choose a rival and take up to 2 of their gold. Combo: when aimed at the same rival as Court Censure, they also lose 1 extra influence.',
   'Mercenary Band': 'Spend 1 gold to add 2 guards against an assassination. Combo: with Royal Guard, add 1 extra guard.',
   'Guild Investment': 'Spend 2 gold now; collect 4 gold at the start of next round.',
@@ -53,6 +54,10 @@ const CARD_EFFECTS = {
   'Hidden Blade': 'If you are a vassal, add 1 support to an assassination vote this round. If you are monarch, it instead adds 1 guard.',
   'Pilgrim’s Alms': 'If you have 5 gold or less, gain 2 gold. Otherwise, gain 1 influence.',
   'Royal Writ': 'Choose a rival and transfer 1 of their influence to yourself, if they have any.',
+  'King’s Bounty': 'Choose plot or defense. If an assassination vote happens and your side wins, gain 2 gold; if it loses, lose up to 1 gold. No vote means no wager result.',
+  'Letters of Protection': 'Choose any player, including yourself. Cancel the first targeted scheme played against them this turn.',
+  'Petition for Redress': 'Choose a vassal, including yourself. If the monarch uses Royal Prerogative, they claim 1 of its 3 gold; otherwise they gain 1 influence. Further petitions beyond the 3-gold claim grant 1 influence instead.',
+  'Poisoned Wine': 'Spend 1 gold whether or not a plot begins. As a vassal, add 2 plot support; as monarch, add 2 royal guards.',
 };
 const CARD_COMBOS = [
   { name: 'Royal Treasury', cards: 'Patronage + Secret Pact', effect: 'If the pact is accepted, both players also gain 1 gold.' },
@@ -158,8 +163,8 @@ function botAction(room, bot) {
   if (room.phase === 'play' && !room.plays[bot.id]) {
     const hand = [...bot.hand];
     const prefers = bot.id === room.king
-      ? ['Patronage','Guild Investment','Royal Guard','Tax Dodge','Counterplot','Blackmail','Court Censure','Assassination Plot','Secret Pact','Spy Network','Gold Tribute','Mercenary Band','Hidden Blade','Royal Writ','Pilgrim’s Alms']
-      : ['Patronage','Blackmail','Guild Investment','Tax Dodge','Assassination Plot','Secret Pact','Court Censure','Spy Network','Royal Guard','Counterplot','Mercenary Band','Gold Tribute','Hidden Blade','Royal Writ','Pilgrim’s Alms'];
+      ? ['Patronage','Guild Investment','Royal Guard','Tax Dodge','Counterplot','Blackmail','Court Censure','Assassination Plot','Secret Pact','Spy Network','Gold Tribute','Mercenary Band','Hidden Blade','Royal Writ','Pilgrim’s Alms','King’s Bounty','Letters of Protection','Petition for Redress','Poisoned Wine']
+      : ['Patronage','Blackmail','Guild Investment','Tax Dodge','Assassination Plot','Secret Pact','Court Censure','Spy Network','Royal Guard','Counterplot','Mercenary Band','Gold Tribute','Hidden Blade','Royal Writ','Pilgrim’s Alms','King’s Bounty','Letters of Protection','Petition for Redress','Poisoned Wine'];
     const first = prefers.find((card) => hand.includes(card)) || hand[0];
     const second = hand.find((card) => card !== first && (card === 'Patronage' || card === 'Royal Guard' || card === 'Tax Dodge' || card === 'Court Censure'));
     const actions = [first, ...(second ? [second] : [])].map((card) => {
@@ -167,7 +172,11 @@ function botAction(room, bot) {
       let target = rivals[0]?.id;
       if (['Blackmail','Court Censure'].includes(card)) target = [...rivals].sort((a,b) => b.gold-a.gold)[0]?.id || target;
       if (card === 'Secret Pact') target = [...rivals].sort((a,b) => (a.king ? 1 : 0)-(b.king ? 1 : 0) || a.influence-b.influence)[0]?.id || target;
-      return { card, target };
+      if (card === 'Letters of Protection') target = bot.id;
+      if (card === 'Petition for Redress') target = bot.id === room.king ? [...rivals].filter(p => p.id !== room.king).sort((a,b) => a.gold-b.gold)[0]?.id || target : bot.id;
+      if (card === 'Gold Tribute' && bot.id === room.king) target = [...rivals].filter(p => p.id !== room.king).sort((a,b) => b.gold-a.gold)[0]?.id || target;
+      const bountySide = card === 'King’s Bounty' ? (bot.id === room.king || (room.heir !== bot.id && bot.gold >= (getById(room, room.king)?.gold || 0)) ? 'no' : 'yes') : undefined;
+      return { card, target, bountySide };
     });
     for (const {card} of actions) bot.hand.splice(bot.hand.indexOf(card),1);
     let decree = null, favor = null, appointmentRole = null, appointmentTarget = null;
@@ -315,8 +324,17 @@ function resolveAssassination(room) {
     const b = room.assassination.votes[pact.b]?.side;
     if (a && a === b) { if (a === 'yes') yesBonus++; else noBonus++; }
   }
+  const plotSucceeds = yes + yesBonus > no + noBonus + guard;
   addLog(room, `The plot draws ${yes + yesBonus} support against ${no + noBonus} opposition and ${guard} royal guard${guard === 1 ? '' : 's'}.`);
-  if (yes + yesBonus > no + noBonus + guard) {
+  for (const player of room.players) {
+    for (const action of room.plays[player.id]?.actions || []) {
+      if (action.card !== 'King’s Bounty') continue;
+      const wins = (action.bountySide === 'no' ? 'no' : 'yes') === (plotSucceeds ? 'yes' : 'no');
+      if (wins) { player.gold += 2; addLog(room, `${player.name}'s King’s Bounty pays off: +2 gold.`); }
+      else { player.gold = Math.max(0, player.gold - 1); addLog(room, `${player.name}'s King’s Bounty fails: -1 gold.`); }
+    }
+  }
+  if (plotSucceeds) {
     addLog(room, `${oldKing?.name || 'The monarch'} is assassinated!`);
     for (const player of room.players) player.office = null;
     addLog(room, 'All royal offices are stripped in the succession crisis.');
@@ -335,8 +353,8 @@ function applyEvent(room) {
   const king = getById(room, room.king);
   const vassals = room.players.filter((p) => p.id !== room.king);
   if (room.event === 'The Harvest Tax') {
-    for (const p of room.players) if (!room.plays[p.id]?.taxDodged) p.gold++;
-    addLog(room, 'Harvest Tax: each player not using Tax Dodge gains 1 gold.');
+    for (const p of room.players) p.gold += room.plays[p.id]?.taxDodged ? 2 : 1;
+    addLog(room, 'Harvest Tax: each player gains 1 gold; Tax Dodge earns its player 1 extra gold.');
   } else if (room.event === 'A Royal Wedding') { king.gold += 2; addLog(room, 'Royal Wedding: the monarch receives 2 gold.'); }
   else if (room.event === 'Border Skirmish') {
     const richest = [...vassals].sort((a, b) => b.gold - a.gold)[0];
@@ -355,7 +373,7 @@ function applyEvent(room) {
     leader.gold += 2; addLog(room, `Merchant Petition: ${leader.name}, the most influential, gains 2 gold.`);
   } else if (room.event === 'The Winter Levy') {
     for (const p of vassals) if (!room.plays[p.id]?.taxDodged && p.gold > 0) { p.gold--; king.gold++; }
-    addLog(room, 'Winter Levy: each vassal not using Tax Dodge pays 1 gold to the monarch.');
+    addLog(room, 'Winter Levy: each vassal without Tax Dodge pays 1 gold to the monarch.');
   }
 }
 function resolveCourtAppointment(room, royal) {
@@ -383,6 +401,41 @@ function resolveCards(room) {
   const autoNo = { value: 0 };
   const plotters = [];
   const pactOffers = [];
+  const petitions = [];
+  const protectedPlayers = new Map();
+  const cancelableTargets = new Set(['Spy Network', 'Blackmail', 'Court Censure', 'Royal Writ', 'Gold Tribute']);
+  for (const player of room.players) {
+    for (const action of room.plays[player.id]?.actions || []) {
+      if (action.card !== 'Letters of Protection') continue;
+      const protectedPlayer = getById(room, action.target);
+      if (!protectedPlayer) continue;
+      protectedPlayers.set(protectedPlayer.id, (protectedPlayers.get(protectedPlayer.id) || 0) + 1);
+      addLog(room, `${player.name} issues Letters of Protection for ${protectedPlayer.name}.`);
+    }
+  }
+  const isProtected = (target, card) => {
+    const charges = target && cancelableTargets.has(card) ? protectedPlayers.get(target.id) || 0 : 0;
+    if (!charges) return false;
+    protectedPlayers.set(target.id, charges - 1);
+    addLog(room, `${target.name}'s Letters of Protection cancel ${card}.`);
+    return true;
+  };
+  const resolvePetitions = (royalPrerogative) => {
+    let claims = 0;
+    for (const petition of petitions) {
+      const recipient = getById(room, petition.target);
+      if (!recipient) continue;
+      if (royalPrerogative && recipient.id !== room.king && claims < 3) {
+        recipient.gold++;
+        claims++;
+        addLog(room, `${petition.player.name}'s Petition for Redress grants ${recipient.name} 1 of the crown's Royal Prerogative gold.`);
+      } else {
+        const gained = gainInfluence(recipient);
+        addLog(room, `${petition.player.name}'s Petition for Redress grants ${gained} influence to ${recipient.name}.`);
+      }
+    }
+    return claims;
+  };
   for (const p of room.players) {
     const play = room.plays[p.id];
     if (!play) continue;
@@ -390,23 +443,36 @@ function resolveCards(room) {
     play.taxDodged = play.actions.some((a) => a.card === 'Tax Dodge');
     for (const action of play.actions) {
       const target = getById(room, action.target);
-      if (action.card === 'Patronage') { p.gold += 2; addLog(room, `${p.name} gains 2 gold through patronage.`); }
+      if (action.card === 'Letters of Protection') continue;
+      if (action.card === 'King’s Bounty') { addLog(room, `${p.name} places a secret King’s Bounty wager.`); }
+      else if (action.card === 'Petition for Redress') { if (target) petitions.push({ player: p, target: target.id }); }
+      else if (action.card === 'Patronage') { p.gold += 2; addLog(room, `${p.name} gains 2 gold through patronage.`); }
       else if (action.card === 'Secret Pact' && target && target.id !== p.id) {
         pactOffers.push({ from: p.id, to: target.id, patronageCombo: play.actions.some((a) => a.card === 'Patronage') });
         addLog(room, `${p.name} offers a Secret Pact to ${target.name}${play.actions.some((card) => card.card === 'Patronage') ? ' through the Royal Treasury combo' : ''}.`);
       } else if (action.card === 'Royal Guard') { guard.value++; addLog(room, `${p.name} places a Royal Guard.`); }
       else if (action.card === 'Spy Network' && target && target.id !== p.id && target.hand.length) {
-        const ti = Math.floor(Math.random() * target.hand.length); const pi = Math.floor(Math.random() * p.hand.length);
-        const stolen = target.hand.splice(ti, 1)[0]; const exchanged = p.hand.splice(pi, 1, stolen)[0]; target.hand.push(exchanged);
-        addLog(room, `${p.name}'s spies secretly trade a card with ${target.name}.`);
+        if (!isProtected(target, action.card)) {
+          const ti = Math.floor(Math.random() * target.hand.length); const pi = Math.floor(Math.random() * p.hand.length);
+          const stolen = target.hand.splice(ti, 1)[0]; const exchanged = p.hand.splice(pi, 1, stolen)[0]; target.hand.push(exchanged);
+          addLog(room, `${p.name}'s spies secretly trade a card with ${target.name}.`);
+        }
       } else if (action.card === 'Assassination Plot') { plotters.push(p.id); addLog(room, `${p.name} calls for the monarch's removal.`); }
       else if (action.card === 'Counterplot') { autoNo.value++; addLog(room, `${p.name} adds an automatic opposing vote with Counterplot.`); }
       else if (action.card === 'Gold Tribute') {
         const monarch = getById(room, room.king);
-        if (p.gold > 0) { p.gold--; monarch.gold++; const gained = gainInfluence(p); addLog(room, `${p.name} pays 1 gold tribute to ${monarch.name} and gains ${gained} influence.`); }
+        if (p.id === room.king && target && target.id !== p.id) {
+          if (!isProtected(target, action.card) && target.gold > 0) {
+            target.gold--; p.gold++; const gained = gainInfluence(p);
+            addLog(room, `${p.name} demands 1 gold tribute from ${target.name} and gains ${gained} influence.`);
+          } else if (target.gold <= 0) addLog(room, `${target.name} has no gold to pay ${p.name}'s tribute.`);
+        } else if (p.gold > 0) { p.gold--; monarch.gold++; const gained = gainInfluence(p); addLog(room, `${p.name} pays 1 gold tribute to ${monarch.name} and gains ${gained} influence.`); }
+        else addLog(room, `${p.name} cannot afford Gold Tribute.`);
       } else if (action.card === 'Blackmail' && target && target.id !== p.id) {
-        const stolen = Math.min(2, target.gold); target.gold -= stolen; p.gold += stolen;
-        addLog(room, `${p.name} blackmails ${target.name} for ${stolen} gold.`);
+        if (!isProtected(target, action.card)) {
+          const stolen = Math.min(2, target.gold); target.gold -= stolen; p.gold += stolen;
+          addLog(room, `${p.name} blackmails ${target.name} for ${stolen} gold.`);
+        }
       } else if (action.card === 'Mercenary Band') {
         if (p.gold > 0) { p.gold--; guard.value += 2; mercenaryUsed = true; addLog(room, `${p.name} spends 1 gold on mercenaries: 2 guards.`); }
         else addLog(room, `${p.name} cannot afford a Mercenary Band.`);
@@ -414,9 +480,11 @@ function resolveCards(room) {
         if (p.gold >= 2) { p.gold -= 2; room.investments.push({ player: p.id, due: room.round + 1, amount: 4 }); addLog(room, `${p.name} invests 2 gold in the guild for 4 next round.`); }
         else addLog(room, `${p.name} cannot afford a Guild Investment.`);
       } else if (action.card === 'Court Censure' && target && target.id !== p.id) {
-        const combo = play.actions.some((a) => a.card === 'Blackmail' && a.target === action.target);
-        target.influence = Math.max(0, target.influence - (combo ? 2 : 1)); target.gold = Math.max(0, target.gold - 1);
-        addLog(room, `${p.name} censures ${target.name}, costing them 1 influence and 1 gold${combo ? ' plus 1 extra influence through the Coercive Audit combo' : ''}.`);
+        if (!isProtected(target, action.card)) {
+          const combo = play.actions.some((a) => a.card === 'Blackmail' && a.target === action.target);
+          target.influence = Math.max(0, target.influence - (combo ? 2 : 1)); target.gold = Math.max(0, target.gold - 1);
+          addLog(room, `${p.name} censures ${target.name}, costing them 1 influence and 1 gold${combo ? ' plus 1 extra influence through the Coercive Audit combo' : ''}.`);
+        }
       } else if (action.card === 'Hidden Blade') {
         if (p.id === room.king) { guard.value++; addLog(room, `${p.name} uses a Hidden Blade to add 1 guard.`); }
         else { yesBonus.value++; addLog(room, `${p.name} readies a Hidden Blade (+1 support if a plot begins).`); }
@@ -424,8 +492,16 @@ function resolveCards(room) {
         if (p.gold <= 5) { p.gold += 2; addLog(room, `${p.name} receives 2 gold in Pilgrim’s Alms.`); }
         else { const gained = gainInfluence(p); addLog(room, `${p.name} turns Pilgrim’s Alms into ${gained} influence.`); }
       } else if (action.card === 'Royal Writ' && target && target.id !== p.id) {
-        if (target.influence > 0) { target.influence--; const gained = gainInfluence(p); addLog(room, `${p.name} uses a Royal Writ to take 1 influence from ${target.name}${gained ? '' : ', but is already at the influence limit'}.`); }
-        else addLog(room, `${p.name} finds no influence to claim with a Royal Writ.`);
+        if (!isProtected(target, action.card)) {
+          if (target.influence > 0) { target.influence--; const gained = gainInfluence(p); addLog(room, `${p.name} uses a Royal Writ to take 1 influence from ${target.name}${gained ? '' : ', but is already at the influence limit'}.`); }
+          else addLog(room, `${p.name} finds no influence to claim with a Royal Writ.`);
+        }
+      } else if (action.card === 'Poisoned Wine') {
+        if (p.gold > 0) {
+          p.gold--;
+          if (p.id === room.king) { guard.value += 2; addLog(room, `${p.name} spends 1 gold on Poisoned Wine; the poisoned cups add 2 royal guards.`); }
+          else { yesBonus.value += 2; addLog(room, `${p.name} spends 1 gold on Poisoned Wine, preparing 2 plot support.`); }
+        } else addLog(room, `${p.name} cannot afford Poisoned Wine; it adds no support or guards.`);
       }
     }
     if (play.actions.some((a) => a.card === 'Royal Guard') && mercenaryUsed) {
@@ -446,6 +522,7 @@ function resolveCards(room) {
   }
   const hasAssassination = plotters.length || room.event === 'Night of Knives';
   if (hasAssassination) {
+    resolvePetitions(false);
     const royalPlay = room.plays[room.king];
     if (royalPlay?.successionCost) {
       const monarch = getById(room, room.king);
@@ -465,16 +542,21 @@ function resolveCards(room) {
   const monarch = getById(room, room.king);
   const royal = room.plays[room.king];
   const decree = royal?.decree;
+  if (decree !== 'Royal Prerogative') resolvePetitions(false);
   if (decree === 'Royal Prerogative') {
+    const petitionClaims = resolvePetitions(true);
     const treasurer = room.players.find((player) => player.office === 'Treasurer');
     const recipient = treasurer && getById(room, room.plays[treasurer.id]?.officeTarget);
     if (recipient && recipient.id !== room.king) {
-      monarch.gold += 2; recipient.gold++;
+      const remaining = Math.max(0, 3 - petitionClaims);
+      const diverted = Math.min(1, remaining);
+      monarch.gold += remaining - diverted; recipient.gold += diverted;
       const gained = gainInfluence(monarch);
-      addLog(room, `${monarch.name} claims 2 gold and ${gained} influence under Royal Prerogative; Treasurer ${treasurer.name} diverts 1 gold to ${recipient.name}.`);
+      addLog(room, `${monarch.name} claims ${remaining - diverted} gold and ${gained} influence under Royal Prerogative; Treasurer ${treasurer.name} diverts ${diverted} gold to ${recipient.name}.`);
     } else {
-      monarch.gold += 3; const gained = gainInfluence(monarch);
-      addLog(room, `${monarch.name} claims 3 gold and ${gained} influence under Royal Prerogative.`);
+      const claim = Math.max(0, 3 - petitionClaims);
+      monarch.gold += claim; const gained = gainInfluence(monarch);
+      addLog(room, `${monarch.name} claims ${claim} gold and ${gained} influence under Royal Prerogative.`);
     }
   }
   else if (decree === 'Favor the Heir') {
@@ -659,6 +741,18 @@ const server = http.createServer(async (req, res) => {
         if (room.plays[me.id]) { json(res, { error: 'Your cards are already committed.' }, 409); return; }
         const actions = Array.isArray(data.actions) ? data.actions.slice(0, 2) : [];
         if (!actions.length || actions.some((a) => !me.hand.includes(a.card))) { json(res, { error: 'Choose one or two cards from your hand.' }, 400); return; }
+        const targetRequired = new Set(['Secret Pact', 'Spy Network', 'Blackmail', 'Court Censure', 'Royal Writ', 'Letters of Protection', 'Petition for Redress']);
+        for (const action of actions) {
+          const target = getById(room, action.target);
+          const monarchTribute = action.card === 'Gold Tribute' && me.id === room.king;
+          if (targetRequired.has(action.card) || monarchTribute) {
+            if (!target) { json(res, { error: `Choose a valid target for ${action.card}.` }, 400); return; }
+            if (action.card === 'Letters of Protection') continue;
+            if ((action.card === 'Petition for Redress' || monarchTribute) && target.id === room.king) { json(res, { error: `${action.card} must target a vassal.` }, 400); return; }
+            if (target.id === me.id && !['Letters of Protection', 'Petition for Redress'].includes(action.card)) { json(res, { error: `${action.card} must target another player.` }, 400); return; }
+          }
+          if (action.card === 'King’s Bounty') action.bountySide = action.bountySide === 'no' ? 'no' : 'yes';
+        }
         const decree = me.id === room.king ? data.decree : null;
         if (decree && !DECREES.includes(decree)) { json(res, { error: 'Choose a valid royal decree.' }, 400); return; }
         const appointmentAction = data.appointmentAction === 'dismiss' ? 'dismiss' : 'appoint';
