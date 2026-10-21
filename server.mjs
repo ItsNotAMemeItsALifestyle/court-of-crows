@@ -9,6 +9,16 @@ const port = Number(process.env.PORT || 4173);
 const rooms = new Map();
 const HAND_LIMIT = 10;
 const INFLUENCE_LIMIT = 3;
+const HOUSE_SIGILS = new Set(['crown', 'sword', 'stag', 'tower', 'rose', 'serpent', 'moon', 'key']);
+const HOUSE_COLORS = new Set(['#7e3432', '#355b4a', '#345477', '#76518a', '#9a6b24', '#386b70', '#7b5037', '#5f6338']);
+function houseIdentity(room) {
+  const usedSigils = new Set(room.players.map((p) => p.sigil).filter(Boolean));
+  const usedColors = new Set(room.players.map((p) => p.houseColor).filter(Boolean));
+  const sigils = [...HOUSE_SIGILS].filter((value) => !usedSigils.has(value));
+  const colors = [...HOUSE_COLORS].filter((value) => !usedColors.has(value));
+  const pick = (values) => values[Math.floor(Math.random() * values.length)];
+  return { sigil: pick(sigils) || 'crown', houseColor: pick(colors) || '#7e3432' };
+}
 
 const EVENTS = [
   { name: 'The Harvest Tax', effect: 'Every player gains 1 gold. Tax Dodge earns its player 1 extra gold.' },
@@ -106,6 +116,7 @@ function publicState(room, token) {
     host: room.players.find((p) => p.token === room.host)?.id,
     players: room.players.map((p) => ({
       id: p.id, name: p.name, gold: p.gold, influence: p.influence, office: p.office || null,
+      sigil: p.sigil || 'crown', houseColor: p.houseColor || '#7e3432',
       bot: Boolean(p.bot),
       king: p.id === room.king && room.phase !== 'succession_vote',
       deposed: room.phase === 'succession_vote' && p.id === room.deposedKing,
@@ -690,10 +701,11 @@ const server = http.createServer(async (req, res) => {
         plays: {}, succession: 'Next in Line', deadline: null, assassination: null, successionVote: null,
         investments: [], pacts: [], pactOffers: [], pactIndex: 0, afterPacts: null, pendingAssassination: null,
       };
+      Object.assign(room.players[0], houseIdentity(room));
       draw(room.players[0], 5); rooms.set(roomCode, room);
       json(res, { token, state: publicState(room, token) }); return;
     }
-    const match = url.pathname.match(/^\/api\/(join|state|start|play|vote|succession|pact|leave|chat|bot)\/([A-Z0-9]+)$/);
+    const match = url.pathname.match(/^\/api\/(join|state|start|play|vote|succession|pact|leave|chat|bot|house)\/([A-Z0-9]+)$/);
     if (match) {
       const [, action, roomCode] = match; const room = rooms.get(roomCode);
       if (!room) { json(res, { error: 'Room not found.' }, 404); return; }
@@ -704,7 +716,7 @@ const server = http.createServer(async (req, res) => {
         if (room.players.length >= 8) { json(res, { error: 'The court is full.' }, 409); return; }
         const botNumber = room.players.filter(p => p.bot).length;
         const name = BOT_NAMES[botNumber % BOT_NAMES.length];
-        const bot = { id: randomUUID(), token: null, bot: true, name, gold: 4, influence: 0, office: null, hand: [] };
+        const bot = { id: randomUUID(), token: null, bot: true, name, ...houseIdentity(room), gold: 4, influence: 0, office: null, hand: [] };
         draw(bot, 5); room.players.push(bot);
         addLog(room, `${name}, a courtier controlled by the host, joins the court.`);
         json(res, { state: publicState(room, data.token) }); return;
@@ -712,12 +724,20 @@ const server = http.createServer(async (req, res) => {
       if (action === 'join') {
         if (room.phase !== 'lobby') { json(res, { error: 'This court has already begun.' }, 409); return; }
         if (room.players.length >= 8) { json(res, { error: 'This court is full.' }, 409); return; }
-        const token = randomUUID(); const p = { id: randomUUID(), token, name: (data.name || 'Player').slice(0, 16), gold: 4, influence: 0, office: null, hand: [] };
+        const token = randomUUID(); const p = { id: randomUUID(), token, name: (data.name || 'Player').slice(0, 16), ...houseIdentity(room), gold: 4, influence: 0, office: null, hand: [] };
         draw(p, 5); room.players.push(p); addLog(room, `${p.name} joins the court.`);
         json(res, { token, state: publicState(room, token) }); return;
       }
       const token = data.token || url.searchParams.get('token'); const me = getPlayer(room, token);
       if (!me) { json(res, { error: 'You are not in this room.' }, 403); return; }
+      if (action === 'house') {
+        if (room.phase !== 'lobby') { json(res, { error: 'House colors and sigils can only change in the lobby.' }, 409); return; }
+        if (!HOUSE_SIGILS.has(data.sigil) || !HOUSE_COLORS.has(data.houseColor)) { json(res, { error: 'Choose a listed house sigil and color.' }, 400); return; }
+        if (room.players.some((p) => p.id !== me.id && p.sigil === data.sigil)) { json(res, { error: 'That house sigil is already claimed.' }, 409); return; }
+        if (room.players.some((p) => p.id !== me.id && p.houseColor === data.houseColor)) { json(res, { error: 'That house color is already claimed.' }, 409); return; }
+        me.sigil = data.sigil; me.houseColor = data.houseColor;
+        json(res, { state: publicState(room, token) }); return;
+      }
       if (action === 'leave') { leaveRoom(room, me); json(res, { ok: true }); return; }
       if (action === 'chat') {
         const message = String(data.message || '').trim();
@@ -844,3 +864,4 @@ function body(req) {
 }
 function json(res, value, status = 200) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); }
 server.listen(port, '0.0.0.0', () => console.log(`Court of Crows running at http://localhost:${port}`));
+
